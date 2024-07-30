@@ -4,8 +4,6 @@ module System.Nix.Nar.Effects
   ( NarEffects(..)
   , narEffectsIO
   , IsExecutable(..)
-  , isExecutable
-  , setExecutable
   ) where
 
 import Control.Monad.Trans.Control (MonadBaseControl)
@@ -21,21 +19,10 @@ import qualified Data.ByteString
 import qualified Data.ByteString.Lazy        as Bytes.Lazy
 import qualified System.Directory            as Directory
 import           System.Posix.Files          ( createSymbolicLink
-                                             , fileMode
                                              , fileSize
-                                             , FileStatus
                                              , getFileStatus
-                                             , getSymbolicLinkStatus
-                                             , groupExecuteMode
-                                             , intersectFileModes
                                              , isDirectory
-                                             , isRegularFile
-                                             , nullFileMode
-                                             , otherExecuteMode
-                                             , ownerExecuteMode
                                              , readSymbolicLink
-                                             , setFileMode
-                                             , unionFileModes
                                              )
 import qualified System.IO                   as IO
 import qualified Control.Exception.Lifted    as Exception.Lifted
@@ -72,13 +59,13 @@ narEffectsIO = NarEffects {
     narReadFile   = liftIO . Bytes.Lazy.readFile
   , narWriteFile  = \f e c -> liftIO $ do
       Bytes.Lazy.writeFile f c
-      Control.Monad.when (e == Executable) $
-        setExecutable f
+      p <- Directory.getPermissions f
+      Directory.setPermissions f (p { Directory.executable = e == Executable })
   , narStreamFile = streamStringOutIO
   , narListDir    = liftIO . Directory.listDirectory
   , narCreateDir  = liftIO . Directory.createDirectory
   , narCreateLink = \f -> liftIO . createSymbolicLink f
-  , narIsExec     = liftIO . fmap (bool NonExecutable Executable . isExecutable) . getSymbolicLinkStatus
+  , narIsExec     = liftIO . (fmap (bool NonExecutable Executable . Directory.executable)) . Directory.getPermissions
   , narIsDir      = fmap isDirectory . liftIO . getFileStatus
   , narIsSymLink  = liftIO . Directory.pathIsSymbolicLink
   , narFileSize   = fmap (fromIntegral . fileSize) . liftIO . getFileStatus
@@ -115,34 +102,10 @@ streamStringOutIO f executable getChunk =
         liftIO $ Data.ByteString.hPut handle c
         go handle
   updateExecutablePermissions =
-    Control.Monad.when (executable == Executable) $
-      setExecutable f
+    Control.Monad.when (executable == Executable) $ do
+      p <- Directory.getPermissions f
+      Directory.setPermissions f (p { Directory.executable = True })
   cleanupException (e :: Exception.Lifted.SomeException) = do
     liftIO $ Directory.removeFile f
     Control.Monad.fail $
       "Failed to stream string to " <> f <> ": " <> show e
-
--- | Check whether the file is executable by the owner.
---
---   Matches the logic used by Nix.
---
---   access() should not be used for this purpose on macOS.
---   It returns false for executables when placed in certain directories.
---   For example, when in an app bundle: App.app/Contents/Resources/en.lproj/myexecutable.strings
-isExecutable :: FileStatus -> Bool
-isExecutable st =
-  isRegularFile st
-    && fileMode st `intersectFileModes` ownerExecuteMode /= nullFileMode
-
--- | Set the file to be executable by the owner, group, and others.
---
---   Matches the logic used by Nix.
-setExecutable :: FilePath -> IO ()
-setExecutable f = do
-  st <- getSymbolicLinkStatus f
-  let p =
-        fileMode st
-          `unionFileModes` ownerExecuteMode
-          `unionFileModes` groupExecuteMode
-          `unionFileModes` otherExecuteMode
-  setFileMode f p
